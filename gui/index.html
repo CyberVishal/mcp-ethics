@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MCP Control Panel</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: monospace;
+      background: #0f0f0f;
+      color: #e5e5e5;
+      display: flex;
+      height: 100vh;
+    }
+
+    /* Sidebar */
+    #sidebar {
+      width: 260px;
+      border-right: 1px solid #222;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+
+    #sidebar h3 {
+      color: #00ffc6;
+      margin: 10px 0;
+    }
+
+    #newSessionBtn {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 10px;
+      background: #111;
+      border: 1px solid #00ffc6;
+      color: #00ffc6;
+      cursor: pointer;
+    }
+
+    #sessions {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: calc(100vh - 120px);
+      overflow-y: auto;
+    }
+
+    .session {
+      padding: 8px;
+      border: 1px solid #333;
+      cursor: pointer;
+      background: #111;
+    }
+
+    .session.active {
+      background: #002a24;
+      border-color: #00ffc6;
+    }
+
+    /* Main panel */
+    #main {
+      flex: 1;
+      padding: 20px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+    }
+
+    h1 {
+      color: #00ffc6;
+      margin: 0 0 10px 0;
+    }
+
+    #output {
+      flex: 1;
+      border: 1px solid #333;
+      background: #111;
+      padding: 10px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    #controls {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    input {
+      flex: 1;
+      background: #111;
+      border: 1px solid #333;
+      color: #fff;
+      padding: 10px;
+    }
+
+    button {
+      background: #111;
+      border: 1px solid #333;
+      color: #fff;
+      padding: 10px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #222;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- LEFT SIDEBAR -->
+  <div id="sidebar">
+    <button id="newSessionBtn">+ New Session</button>
+    <h3>Sessions</h3>
+    <div id="sessions"></div>
+  </div>
+
+  <!-- MAIN CHAT -->
+  <div id="main">
+    <h1>MCP Control Panel</h1>
+    <div id="output"></div>
+
+    <div id="controls">
+      <input id="cmd" placeholder="Type a command..." />
+      <button id="sendBtn">Send</button>
+      <button onclick="openPlugins()">🧩 Plugins</button>
+      <button id="tiredBtn">😴 I am tired</button>
+      <button id="stopBtn">🛑 Stop</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    function openPlugins() {
+      window.location.href = "/plugins.html";
+    }
+  </script>
+</body>
+</html>
+

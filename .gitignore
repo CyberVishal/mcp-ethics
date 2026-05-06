@@ -1,0 +1,13 @@
+node_modules
+.env
+.DS_Store
+
+outputs
+reports
+recon_logs
+
+*.db
+*.txt
+
+npm-debug.log
+.vscode
