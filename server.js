@@ -1,15 +1,24 @@
 /* ======================================================
    MCP ETHICAL SERVER — STABLE + PLANNER + LIVE EXECUTION
    ====================================================== */
-
 import MCPAgent from "./mcpAgent.js";
-import { generatePlan } from "./mcpPlanner.js";
+import {
+  generatePlan,
+  generateChatResponse
+} from "./mcpPlanner.js";
+import { classifyIntent, validatePlanSafety } from "./policy.js";
+import { classifySecurityIntent } from "./intentClassifier.js";
+import { buildWorkflow } from "./workflowPlanner.js";
+import {
+  createWorkflowRecord,
+  getWorkflowRecord,
+  listWorkflowRecords
+} from "./workflowStore.js";
 import { scanNetwork, scanSubnets, generateVulnerabilityReport } from "./scanNetwork.js";
 import fs from "fs";
 import path from "path";
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 import { v4 as uuidv4 } from "uuid";
 import net from "net";
 import { exec } from "child_process";
@@ -33,14 +42,24 @@ const liveClients = new Map();
 
 const lastUserMessage = {};
 const lastDebugPayload = {};
+const repairAttempts = {};
+const MAX_REPAIR_ATTEMPTS = 1;
 
 /* ================= AGENT STATUS → SESSION + LIVE ================= */
 
-agent.on("status", ({ sessionId, message }) => {
+agent.on("status", ({ sessionId, message, phase, state, data, timestamp, eventType }) => {
   loadSession(sessionId, async (id, history) => {
     if (!id) return;
 
-    const entry = { role: "assistant", content: message };
+    const entry = {
+      role: "assistant",
+      kind: phase || "execution",
+      state: state || "info",
+      content: message,
+      data: data || {},
+      eventType: eventType || data?.eventType,
+      timestamp: timestamp || new Date().toISOString()
+    };
     history.push(entry);
     saveSession(id, history);
 
@@ -50,45 +69,69 @@ agent.on("status", ({ sessionId, message }) => {
         res.write(`data: ${JSON.stringify(entry)}\n\n`);
       }
     }
-
-    /* ================= SELF-REPAIR TRIGGER ================= */
-
-    if (message.includes("EXECUTION ERROR — DEBUG PAYLOAD")) {
-      try {
-        const jsonPart = message.split("DEBUG PAYLOAD:")[1];
-        const debug = JSON.parse(jsonPart);
-
-        lastDebugPayload[id] = debug;
-
-        const repairPrompt =
-          `Original request:\n${lastUserMessage[id] || "unknown"}\n\n` +
-          `Execution failed.\nDebug info:\n${JSON.stringify(debug, null, 2)}\n\n` +
-          `Generate a corrected plan with VALID executable commands only.`;
-
-        const repairedPlan = await generatePlan(repairPrompt);
-
-        if (repairedPlan.commands.length > 0) {
-          pendingPlans[id] = repairedPlan;
-
-          history.push({
-            role: "assistant",
-            content:
-              "🔧 AUTO-REPAIRED PLAN GENERATED:\n" +
-              JSON.stringify(repairedPlan, null, 2) +
-              "\n\nType RUN to execute."
-          });
-
-          saveSession(id, history);
-        }
-      } catch (_) {}
-    }
   });
 });
 
-/* ================= OLLAMA ================= */
+agent.on("execution-error", async ({ sessionId, plan, debug }) => {
+  if (!sessionId || debug?.reason === "USER_STOPPED") return;
 
-const OLLAMA = "http://localhost:11434/api/generate";
-const MODEL = "thirdeyeai/Qwen2.5-Coder-7B-Instruct-Uncensored:Q4_0";
+  repairAttempts[sessionId] = repairAttempts[sessionId] || 0;
+  if (repairAttempts[sessionId] >= MAX_REPAIR_ATTEMPTS) {
+    appendAssistantMessage(sessionId, {
+      kind: "execution",
+      state: "failed",
+      content: "🧯 Auto-repair limit reached. Review the execution log before retrying.",
+      data: debug
+    });
+    return;
+  }
+
+  repairAttempts[sessionId]++;
+  lastDebugPayload[sessionId] = debug;
+
+  const repairPrompt =
+    `Original request:\n${lastUserMessage[sessionId] || "unknown"}\n\n` +
+    `Previous plan:\n${JSON.stringify(plan, null, 2)}\n\n` +
+    `Execution failed.\nDebug info:\n${JSON.stringify(debug, null, 2)}\n\n` +
+    "Generate one corrected safe macOS plan. Use brew only when a missing tool must be installed. Commands must be non-interactive.";
+
+  try {
+    const repairedPlan = await generatePlan(repairPrompt);
+    const safety = validatePlanSafety(repairedPlan);
+
+    if (!safety.ok || !safety.plan.commands.length) {
+      appendAssistantMessage(sessionId, {
+        kind: "execution",
+        state: "failed",
+        content:
+          "🧯 Auto-repair could not produce a safe executable plan.\n" +
+          JSON.stringify(safety.plan || repairedPlan, null, 2),
+        data: { reason: safety.reason }
+      });
+      return;
+    }
+
+    appendAssistantMessage(sessionId, {
+      kind: "planner",
+      state: "repaired",
+      content:
+        "🔧 Auto-repair generated a corrected plan and is retrying once:\n" +
+        JSON.stringify(safety.plan, null, 2),
+      data: { plan: safety.plan }
+    });
+
+    setTimeout(() => {
+      agent.executePlan({ sessionId, plan: safety.plan });
+    }, 250);
+  } catch (err) {
+    appendAssistantMessage(sessionId, {
+      kind: "execution",
+      state: "failed",
+      content: `🧯 Auto-repair failed: ${err.message}`,
+      data: { error: err.message }
+    });
+  }
+});
 
 /* ================= SESSION HELPERS ================= */
 
@@ -106,6 +149,28 @@ function saveSession(id, history) {
     "UPDATE sessions SET history = ? WHERE id = ?",
     [JSON.stringify(history), id]
   );
+}
+
+function appendAssistantMessage(sessionId, entry) {
+  loadSession(sessionId, (id, history) => {
+    if (!id) return;
+    const message = {
+      role: "assistant",
+      kind: entry.kind || "chat",
+      state: entry.state || "info",
+      content: entry.content,
+      data: entry.data || {},
+      timestamp: entry.timestamp || new Date().toISOString()
+    };
+    history.push(message);
+    saveSession(id, history);
+    const clients = liveClients.get(id);
+    if (clients) {
+      for (const client of clients) {
+        client.write(`data: ${JSON.stringify(message)}\n\n`);
+      }
+    }
+  });
 }
 
 /* ================= SESSION ROUTES ================= */
@@ -156,77 +221,138 @@ app.get("/session/:id/stream", (req, res) => {
   });
 });
 
-/* ================= MCP PLANNER ================= */
-
-function isEthicalHackingIntent(text) {
-  return /(scan|recon|vuln|vulnerability|payload|reverse|shell|metasploit|exploit|auxiliary|wifi|network|android|windows|enumerat|osint|brute)/i.test(
-    text
-  );
-}
-
 /* ================= MCP CHAT ================= */
 
 const pendingPlans = {};
+const pendingWorkflows = {};
 
 app.post("/mcp/chat", (req, res) => {
   const { message = "", sessionId } = req.body;
-  const lower = message.toLowerCase();
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
 
   loadSession(sessionId, async (id, history) => {
     if (!id) return res.status(400).json({ error: "No session selected" });
 
-    lastUserMessage[id] = message;
-    history.push({ role: "user", content: message });
+    lastUserMessage[id] = trimmed;
+    history.push({ role: "user", kind: "user", content: trimmed, timestamp: new Date().toISOString() });
     saveSession(id, history);
 
     if (pendingPlans[id]) {
       if (lower === "run") {
-        const plan = pendingPlans[id];
+        const pending = pendingPlans[id];
         delete pendingPlans[id];
-        agent.executePlan({ sessionId: id, plan });
-        return res.json({ reply: "Execution started." });
+        repairAttempts[id] = 0;
+
+        if (pendingWorkflows[id]) {
+          const workflow = pendingWorkflows[id];
+          delete pendingWorkflows[id];
+          agent.executeWorkflow({ sessionId: id, workflow });
+        } else {
+          agent.executePlan({ sessionId: id, plan: pending });
+        }
+
+        return res.json({ reply: "Execution started.", kind: "execution", state: "running" });
       }
       if (lower === "cancel") {
         delete pendingPlans[id];
-        return res.json({ reply: "Task cancelled." });
+        delete pendingWorkflows[id];
+        return res.json({ reply: "Task cancelled.", kind: "planner", state: "cancelled" });
       }
-      return res.json({ reply: "Waiting for RUN or CANCEL." });
+      return res.json({ reply: "Waiting for RUN or CANCEL.", kind: "planner", state: "waiting" });
     }
 
-    if (message.length > 3) {
+    if (lower === "stop") {
+      const stopped = agent.stopExecution(id);
+      return res.json({
+        reply: stopped ? "Stop requested." : "No execution is currently running.",
+        kind: "execution",
+        state: stopped ? "stopping" : "idle"
+      });
+    }
+
+    if (trimmed.length > 3) {
       db.run(
         "UPDATE sessions SET title = ? WHERE id = ? AND title IS NULL",
-        [message.slice(0, 60), id]
+        [trimmed.slice(0, 60), id]
       );
     }
 
-    /* 🔥 FIX: ETHICAL HACKING INTENT ALWAYS PLANS */
-    if (isEthicalHackingIntent(message)) {
-      const plan = await generatePlan(message);
+    const structuredIntent = classifySecurityIntent(trimmed);
+    const intent = classifyIntent(trimmed);
 
-      if (plan.commands.length === 0) {
-        history.push({
-          role: "assistant",
-          content:
-            "⚠️ Planner determined this request is conceptual or unsafe to execute.\n\n" +
-            JSON.stringify(plan, null, 2)
-        });
-        saveSession(id, history);
-        return res.json({ reply: "Planner analysis complete." });
-      }
+    if (structuredIntent.category === "disallowed" || intent.kind === "disallowed") {
+      const reply =
+        "I can’t help with malware, credential theft, ransomware, persistence, destructive actions, or unauthorized access. I can help with defensive scanning, recon, local auditing, or educational explanations.";
+      history.push({
+        role: "assistant",
+        kind: "security",
+        state: "rejected",
+        content: reply,
+        data: { classification: structuredIntent },
+        timestamp: new Date().toISOString()
+      });
+      saveSession(id, history);
+      return res.json({ reply, kind: "security", state: "rejected" });
+    }
 
-      pendingPlans[id] = plan;
+    if (!structuredIntent.actionable) {
+      const reply = await generateChatResponse(trimmed);
 
       history.push({
         role: "assistant",
-        content: "PLANNED TASK:\n" + JSON.stringify(plan, null, 2)
+        kind: structuredIntent.category === "conceptual" ? "conceptual_cybersecurity" : structuredIntent.category,
+        state: "completed",
+        content: reply,
+        data: { classification: structuredIntent },
+        timestamp: new Date().toISOString()
+      });
+
+      saveSession(id, history);
+
+      return res.json({ reply, kind: structuredIntent.category, state: "completed" });
+    }
+
+    if (structuredIntent.actionable) {
+      const workflow = buildWorkflow(trimmed);
+
+      if (workflow.status === "rejected" || !workflow.steps.length) {
+        history.push({
+          role: "assistant",
+          kind: "planner",
+          state: "rejected",
+          content:
+            "⚠️ Workflow planner rejected this request.\n\n" +
+            JSON.stringify(workflow, null, 2),
+          data: { classification: structuredIntent, workflow },
+          timestamp: new Date().toISOString()
+        });
+        saveSession(id, history);
+        return res.json({ reply: "Workflow planning rejected.", kind: "planner", state: "rejected" });
+      }
+
+      createWorkflowRecord({ workflow, sessionId: id });
+      pendingPlans[id] = { type: "workflow_approval", workflowId: workflow.workflowId, commands: [] };
+      pendingWorkflows[id] = workflow;
+
+      history.push({
+        role: "assistant",
+        kind: "planner",
+        state: "waiting",
+        content:
+          "PLANNED WORKFLOW:\n" +
+          JSON.stringify(workflow, null, 2),
+        data: { workflow, classification: structuredIntent },
+        timestamp: new Date().toISOString()
       });
       saveSession(id, history);
 
       return res.json({
+        kind: "planner",
+        state: "waiting",
         reply:
-          "PLAN READY:\n\n" +
-          JSON.stringify(plan, null, 2) +
+          "WORKFLOW READY:\n\n" +
+          JSON.stringify(workflow, null, 2) +
           "\n\nType RUN to execute."
       });
     }
@@ -234,6 +360,32 @@ app.post("/mcp/chat", (req, res) => {
     /* Default: normal chat passthrough */
     return res.json({ reply: "Message received." });
   });
+});
+
+app.get("/workflows/:sessionId", (req, res) => {
+  listWorkflowRecords(req.params.sessionId, rows => res.json(rows));
+});
+
+app.get("/workflow/:id", (req, res) => {
+  getWorkflowRecord(req.params.id, row => {
+    if (!row) return res.status(404).json({ error: "Workflow not found" });
+    res.json(row);
+  });
+});
+
+app.get("/report", (req, res) => {
+  const reportPath = String(req.query.path || "");
+  const reportsRoot = path.join(process.env.HOME || process.cwd(), "Desktop", "MCP_Output", "reports");
+  const resolved = path.resolve(reportPath);
+
+  if (!resolved.startsWith(path.resolve(reportsRoot))) {
+    return res.status(403).json({ error: "Report path not allowed" });
+  }
+  if (!fs.existsSync(resolved)) {
+    return res.status(404).json({ error: "Report not found" });
+  }
+  res.type(path.extname(resolved) === ".json" ? "application/json" : "text/markdown");
+  res.send(fs.readFileSync(resolved, "utf8"));
 });
 
 /* ================= OLLAMA AUTO START ================= */
@@ -323,4 +475,3 @@ ensureOllamaRunning().then(() => {
     console.log(`MCP running at http://localhost:${PORT}`)
   );
 });
-

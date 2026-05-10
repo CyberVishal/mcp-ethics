@@ -11,9 +11,42 @@ const sessionsDiv = document.getElementById("sessions");
 
 /* ================= UTIL ================= */
 
-function print(role, text) {
-  output.textContent += `${role}: ${text}\n`;
-  output.scrollTop = output.scrollHeight;
+function print(role, text, meta = {}) {
+  const shouldStick = output.scrollTop + output.clientHeight >= output.scrollHeight - 80;
+  const collapsible = ["stdout", "stderr"].includes(meta.eventType);
+  const item = document.createElement(collapsible ? "details" : "div");
+  item.className = `message ${meta.kind || "chat"} ${meta.state || "info"}`;
+  if (collapsible) item.open = false;
+
+  const header = document.createElement(collapsible ? "summary" : "div");
+  header.className = "message-header";
+  header.textContent = `${role}${meta.kind ? ` · ${labelForKind(meta.kind)}` : ""}${meta.eventType ? ` · ${meta.eventType}` : ""}${meta.state ? ` · ${meta.state}` : ""}`;
+
+  const body = document.createElement("pre");
+  body.className = "message-body";
+  body.textContent = text;
+
+  item.appendChild(header);
+  item.appendChild(body);
+  output.appendChild(item);
+
+  if (meta.data?.outputFiles?.length || meta.data?.logFile) {
+    const files = document.createElement("div");
+    files.className = "message-files";
+    const locations = [...(meta.data.outputFiles || []), meta.data.logFile].filter(Boolean);
+    files.textContent = `Output location: ${locations.join(" | ")}`;
+    item.appendChild(files);
+  }
+
+  if (meta.data?.workflow?.steps?.length) {
+    item.appendChild(renderWorkflowProgress(meta.data.workflow));
+  }
+
+  if (meta.data?.reports?.length) {
+    item.appendChild(renderReports(meta.data.reports));
+  }
+
+  if (shouldStick) output.scrollTop = output.scrollHeight;
 
   // permission gate detection
   if (
@@ -36,7 +69,7 @@ function print(role, text) {
 }
 
 function clearChat() {
-  output.textContent = "";
+  output.innerHTML = "";
   lastRenderedLength = 0;
   permissionGateActive = false;
 
@@ -49,10 +82,75 @@ function clearChat() {
 function renderHistory(history) {
   for (let i = lastRenderedLength; i < history.length; i++) {
     const m = history[i];
-    if (m.role === "user") print("You", m.content);
-    if (m.role === "assistant") print("MCP", m.content);
+    if (m.role === "user") print("You", m.content, { kind: "user", state: "sent" });
+    if (m.role === "assistant") {
+      print("MCP", m.content, {
+        kind: m.kind || "chat",
+        state: m.state || "info",
+        eventType: m.eventType,
+        data: m.data || {}
+      });
+    }
   }
   lastRenderedLength = history.length;
+}
+
+function labelForKind(kind) {
+  const labels = {
+    conversational: "Chat",
+    informational: "Info",
+    conceptual_cybersecurity: "Concept",
+    planner: "Planner",
+    execution: "Execution",
+    execute: "Execution",
+    install: "Install",
+    workflow: "Workflow",
+    debug: "Debug",
+    security: "Security",
+    user: "User"
+  };
+  return labels[kind] || kind;
+}
+
+function renderWorkflowProgress(workflow) {
+  const wrap = document.createElement("div");
+  wrap.className = "workflow-progress";
+
+  workflow.steps.forEach(step => {
+    const badge = document.createElement("span");
+    badge.className = `status-badge ${step.status || "pending"}`;
+    badge.textContent = `${step.order}. ${step.title}: ${step.status || "pending"}`;
+    wrap.appendChild(badge);
+  });
+
+  return wrap;
+}
+
+function renderReports(reports) {
+  const wrap = document.createElement("div");
+  wrap.className = "report-links";
+
+  reports.forEach(report => {
+    const btn = document.createElement("button");
+    btn.textContent = `View ${report.type}`;
+    btn.onclick = async () => {
+      const res = await fetch(`/report?path=${encodeURIComponent(report.path)}`);
+      const text = await res.text();
+      showReport(report.path, text);
+    };
+    wrap.appendChild(btn);
+  });
+
+  return wrap;
+}
+
+function showReport(title, text) {
+  const panel = document.getElementById("reportViewer");
+  const titleEl = document.getElementById("reportTitle");
+  const body = document.getElementById("reportBody");
+  titleEl.textContent = title;
+  body.textContent = text;
+  panel.hidden = false;
 }
 
 /* ================= LIVE STREAM (SSE) ================= */
@@ -66,7 +164,12 @@ function connectLiveStream(sessionId) {
     try {
       const msg = JSON.parse(e.data);
       if (msg?.content) {
-        print("MCP", msg.content);
+        print("MCP", msg.content, {
+          kind: msg.kind || "execution",
+          state: msg.state || "info",
+          eventType: msg.eventType,
+          data: msg.data || {}
+        });
         lastRenderedLength++; // keep in sync
       }
     } catch (_) {}
@@ -129,8 +232,8 @@ async function loadSession(id) {
 
 /* ================= SAFE POLLING (FALLBACK) ================= */
 
-async function refreshSession() {
-  if (!currentSessionId || permissionGateActive) return;
+async function refreshSession(force = false) {
+  if (!currentSessionId || (permissionGateActive && !force)) return;
 
   const res = await fetch(`/session/${currentSessionId}`);
   const data = await res.json();
@@ -154,7 +257,7 @@ async function newSession() {
 /* ================= SEND MESSAGE ================= */
 
 async function sendMessage(extra = {}) {
-  const msg = input.value.trim();
+  const msg = (extra.message ?? input.value).trim();
   if (!msg && !extra.force) return;
 
   if (!currentSessionId) await newSession();
@@ -172,7 +275,17 @@ async function sendMessage(extra = {}) {
   });
 
   const data = await res.json();
-  if (data.reply) print("MCP", data.reply);
+  if (
+    data.reply &&
+    (
+      ["cancelled", "idle", "stopping"].includes(data.state) ||
+      data.reply.startsWith("Waiting for")
+    )
+  ) {
+    print("MCP", data.reply, { kind: data.kind || "chat", state: data.state || "info" });
+  }
+
+  await refreshSession(true);
 
   loadSessions();
 }
@@ -189,6 +302,8 @@ tiredBtn.onclick = () =>
   sendMessage({ force: true, message: "i am tired" });
 
 document.getElementById("newSessionBtn").onclick = newSession;
+document.getElementById("stopBtn").onclick = () =>
+  sendMessage({ force: true, message: "stop" });
 
 /* ================= AUTO REFRESH ================= */
 
@@ -197,4 +312,3 @@ setInterval(refreshSession, 1500);
 /* ================= INIT ================= */
 
 loadSessions();
-

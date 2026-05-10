@@ -29,5 +29,23 @@ db.serialize(() => {
       timestamp TEXT
     )
   `);
-});
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS workflows (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      status TEXT,
+      prompt TEXT,
+      target TEXT,
+      classification TEXT,
+      plan TEXT,
+      results TEXT,
+      reports TEXT,
+      failure TEXT,
+      retry_count INTEGER DEFAULT 0,
+      created_at TEXT,
+      updated_at TEXT,
+      completed_at TEXT
+    )
+  `);
+});

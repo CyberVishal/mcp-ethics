@@ -1,11 +1,11 @@
-import { exec } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import path from "path";
 import os from "os";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
+import { normalizeCommand, validateCommand } from "./policy.js";
 
-const execAsync = promisify(exec);
+const SCAN_TIMEOUT_MS = 10 * 60 * 1000;
 
 export async function scanNetwork({ target, scanType = "nmap", onStatus }) {
   const scanId = uuidv4();
@@ -37,9 +37,20 @@ export async function scanNetwork({ target, scanType = "nmap", onStatus }) {
       throw new Error(`Unknown scan type: ${scanType}`);
     }
 
+    const commandIssue = validateCommand(command);
+    if (commandIssue) {
+      throw new Error(`Blocked scan command: ${commandIssue}`);
+    }
+    command = normalizeCommand(command);
+
     onStatus(`🖥️ Running: ${command}`);
     
-    const { stdout, stderr } = await execAsync(command, { timeout: 300000 });
+    const { stdout, stderr } = await runStreamingCommand({
+      command,
+      timeoutMs: SCAN_TIMEOUT_MS,
+      onStdout: chunk => onStatus(chunk),
+      onStderr: chunk => onStatus(`⚠️ ${chunk}`)
+    });
     
     const results = {
       scanId,
@@ -123,7 +134,17 @@ export async function scanSubnets({ subnet, onStatus }) {
   onStatus(`🌐 Scanning subnet: ${subnet}...`);
   
   try {
-    const { stdout } = await execAsync(`nmap -sn ${subnet}`, { timeout: 600000 });
+    const command = `nmap -sn ${subnet}`;
+    const commandIssue = validateCommand(command);
+    if (commandIssue) throw new Error(`Blocked scan command: ${commandIssue}`);
+    const normalizedCommand = normalizeCommand(command);
+
+    const { stdout } = await runStreamingCommand({
+      command: normalizedCommand,
+      timeoutMs: SCAN_TIMEOUT_MS,
+      onStdout: chunk => onStatus(chunk),
+      onStderr: chunk => onStatus(`⚠️ ${chunk}`)
+    });
     const hosts = [];
     
     const lines = stdout.split("\n");
@@ -159,4 +180,60 @@ export async function generateVulnerabilityReport(scans) {
   };
 
   return report;
+}
+
+function runStreamingCommand({ command, timeoutMs, onStdout, onStderr }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/bin/zsh", ["-f", "-c", command], {
+      env: {
+        ...process.env,
+        CI: "1",
+        NONINTERACTIVE: "1"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let forceKillTimer = null;
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, 2500);
+    }, timeoutMs);
+
+    child.stdout.on("data", data => {
+      const chunk = data.toString();
+      stdout += chunk;
+      onStdout?.(chunk);
+    });
+
+    child.stderr.on("data", data => {
+      const chunk = data.toString();
+      stderr += chunk;
+      onStderr?.(chunk);
+    });
+
+    child.on("error", err => {
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      reject(err);
+    });
+
+    child.on("close", code => {
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (timedOut) {
+        return reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }
+      if (code !== 0) {
+        return reject(new Error(`Command failed with exit code ${code}: ${stderr.trim()}`));
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }

@@ -77,7 +77,109 @@
       background: #111;
       padding: 10px;
       overflow-y: auto;
+    }
+
+    .message {
+      border-left: 3px solid #555;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      background: #151515;
+    }
+
+    .message.user {
+      border-left-color: #8ab4f8;
+    }
+
+    .message.planner {
+      border-left-color: #ffd166;
+    }
+
+    .message.execution,
+    .message.execute,
+    .message.install,
+    .message.workflow {
+      border-left-color: #00ffc6;
+    }
+
+    .message.security,
+    .message.failed,
+    .message.rejected,
+    .message.debug {
+      border-left-color: #ff5c7a;
+    }
+
+    .message-header {
+      color: #aaa;
+      font-size: 12px;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+
+    .message-body {
+      margin: 0;
+      color: #eee;
+      font-family: monospace;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .message-files {
+      margin-top: 6px;
+      color: #00ffc6;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .workflow-progress,
+    .report-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .status-badge {
+      border: 1px solid #333;
+      color: #ddd;
+      padding: 4px 6px;
+      font-size: 12px;
+      background: #111;
+    }
+
+    .status-badge.running {
+      border-color: #ffd166;
+      color: #ffd166;
+    }
+
+    .status-badge.completed {
+      border-color: #00ffc6;
+      color: #00ffc6;
+    }
+
+    .status-badge.failed {
+      border-color: #ff5c7a;
+      color: #ff5c7a;
+    }
+
+    #reportViewer {
+      border: 1px solid #333;
+      background: #101010;
+      margin-top: 10px;
+      max-height: 30vh;
+      overflow: auto;
+      padding: 10px;
+    }
+
+    #reportTitle {
+      color: #00ffc6;
+      margin-bottom: 8px;
+      overflow-wrap: anywhere;
+    }
+
+    #reportBody {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
 
     #controls {
@@ -121,6 +223,10 @@
   <div id="main">
     <h1>MCP Control Panel</h1>
     <div id="output"></div>
+    <div id="reportViewer" hidden>
+      <div id="reportTitle"></div>
+      <pre id="reportBody"></pre>
+    </div>
 
     <div id="controls">
       <input id="cmd" placeholder="Type a command..." />
@@ -139,4 +245,3 @@
   </script>
 </body>
 </html>
-
